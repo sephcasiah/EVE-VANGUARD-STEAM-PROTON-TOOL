@@ -443,7 +443,7 @@ def main():
         run_injection(args)
     except KeyboardInterrupt:
         err("Interrupted by user.")
-        except Exception as e:
+    except Exception as e:
         err("Unhandled error:", str(e))
         _write_log_line(traceback.format_exc())
         err("Traceback written to log file:", str(LOG_PATH))
