@@ -157,7 +157,7 @@ def write_shortcuts(path: Path, obj):
     if not path.parent.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as fh:
-        vdf.binary_dump(fh, obj)
+        vdf.binary_dump(obj, fh)
 
 def find_numeric_container(node):
     if isinstance(node, dict):
