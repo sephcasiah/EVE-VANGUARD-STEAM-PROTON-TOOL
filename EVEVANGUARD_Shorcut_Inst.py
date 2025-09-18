@@ -10,11 +10,22 @@ DISCLAIMER
 - For issues, contact the tool author/maintainer (not CCP).
 
 Steps performed:
+1) Locate Steam userdata and pick first profile (or --interactive to choose).
+2) Backup and inject a Non-Steam "EVE Vanguard" shortcut into shortcuts.vdf.
+3) (Optional) Watch for a running Vanguard process and capture args to LaunchOptions.
+4) Compute non-Steam AppID and write Proton mapping (CompatToolMapping) to config.vdf.
+5) Print results; user restarts Steam to apply.
+
+Steps performed:
 1) Locate Steam + profile, and auto-discover Vanguard prefix/exe (prompt only if missing).
 2) Backup VDFs; inject Non-Steam "EVE Vanguard" shortcut.
 3) Auto-capture Vanguard runtime args from the running client and set LaunchOptions.
 4) Compute non-Steam AppID; set Proton mapping in config.vdf.
 5) Persist config for future runs; write a verbose log file; print summary.
+
+Quickstart:
+  python3 -m pip install --user vdf psutil
+  python3 vanguard_proton_helper.py --debug
 """
 import os, sys, argparse, shutil, time, json, zlib, traceback
 from pathlib import Path
@@ -28,7 +39,7 @@ except Exception:
     sys.exit(1)
 
 DEBUG = False
-APP_NAME = "EVEVANGAURD_Shorcut_Inst"
+APP_NAME = "EVEVANGUARD_Shorcut_Inst"
 DEFAULT_SHORTCUT_NAME = "EVE Vanguard"
 DEFAULT_STEAM_ROOTS = [
     Path.home() / ".local" / "share" / "Steam",
@@ -41,7 +52,7 @@ DEFAULT_REL_EXE = "drive_c/CCP/EVE/eve-vanguard/live/WindowsClient/start_protect
 DEFAULT_PROTON = "proton_experimental"
 DEFAULT_PRIORITY = 250
 
-STATE_DIR = Path.home() / ".config" / "EVEVANGAURD_Shorcut_Inst"
+STATE_DIR = Path.home() / ".config" / "EVEVANGUARD_Shorcut_Inst"
 LOGS_DIR = STATE_DIR / "logs"
 CONF_PATH = STATE_DIR / "config.json"
 LOG_PATH = None
