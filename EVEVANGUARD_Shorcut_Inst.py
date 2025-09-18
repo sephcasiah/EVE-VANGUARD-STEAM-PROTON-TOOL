@@ -27,7 +27,7 @@ Quickstart:
   python3 -m pip install --user vdf psutil
   python3 vanguard_proton_helper.py --debug
 """
-import os, sys, argparse, shutil, time, json, zlib, traceback
+import os, sys, argparse, shutil, time, json, traceback, random
 from pathlib import Path
 from datetime import datetime
 
@@ -176,6 +176,7 @@ def next_index(container: dict):
 
 def make_shortcut(name, exe, startdir, icon="", launch_opts=""):
     return {
+        "appid": random.randint(-2147483648, -1),
         "appname": name,
         "exe": exe,
         "StartDir": startdir,
@@ -216,15 +217,6 @@ def write_text_vdf(path: Path, obj):
         path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         vdf.dump(obj, fh, pretty=True)
-
-def compute_nonsteam_appid(exe: str, appname: str) -> int:
-    key = (exe + appname).encode("utf-8")
-    crc = zlib.crc32(key) & 0xffffffff
-    appid = (crc | 0x80000000) & 0xffffffff
-    return appid
-
-def to_rungameid(appid: int) -> int:
-    return ((appid & 0xffffffff) << 32) | 0x02000000
 
 def scan_vanguard_args(timeout=120, poll=2):
     marker = "EVEVanguardClient-Win64-Shipping.exe"
@@ -325,11 +317,10 @@ def print_status(saved: dict, steam_root: Path|None, profile_id: str|None, short
             container = find_numeric_container(obj) or obj.get("shortcuts") or obj
             for k, ent in container.items():
                 if isinstance(ent, dict) and ent.get("appname") == name:
-                    exe = ent.get("exe","")
-                    appid = compute_nonsteam_appid(exe, name)
+                    appid = ent["appid"]
                     mapping = get_compat_tool(config_vdf, appid) if config_vdf else None
                     info(f"Detected shortcut index: {k}")
-                    info(f"Computed AppID: {appid} (rungameid: {to_rungameid(appid)})")
+                    info(f"Shortcut AppID: {appid}")
                     info(f"LaunchOptions: {ent.get('LaunchOptions','')!r}")
                     info(f"Proton mapping: {mapping if mapping else '(none)'}")
                     break
@@ -386,28 +377,31 @@ def run_injection(args):
         prefix = input("Enter Vanguard Proton prefix: ").strip()
         exe_rel = input(f"Enter path to Vanguard exe relative to prefix (e.g. {DEFAULT_REL_EXE}): ").strip()
 
+    if not args.dry_run:
+        tail = scan_vanguard_args(timeout=args.timeout)
+
+    info("Waiting for Steam to exit before continuing")
+    while is_steam_running(args.steam_root) and not args.dry_run and not args.force:
+        time.sleep(1)
+
     exe_rel = exe_rel.replace("\\","/")
     startdir = str((Path(prefix).expanduser() / Path(exe_rel).parent).resolve())
-
     idx, entry = inject_shortcut(shortcuts_path, args.name, exe_rel, startdir, args.icon, "", args.dry_run)
     info(f"Shortcut injected (index {idx}) at {shortcuts_path}")
 
-    if not args.dry_run:
-        tail = scan_vanguard_args(timeout=args.timeout)
-        if tail:
-            obj = read_shortcuts(shortcuts_path)
-            container = find_numeric_container(obj) or obj.get("shortcuts") or obj
-            if idx in container:
-                container[idx]["LaunchOptions"] = tail
-                backup(shortcuts_path)
-                write_shortcuts(shortcuts_path, obj)
-                info("Patched LaunchOptions =", tail)
-        else:
-            info("Proceeding without LaunchOptions (none captured).")
+    if tail:
+        obj = read_shortcuts(shortcuts_path)
+        container = find_numeric_container(obj) or obj.get("shortcuts") or obj
+        if idx in container:
+            container[idx]["LaunchOptions"] = tail
+            backup(shortcuts_path)
+            write_shortcuts(shortcuts_path, obj)
+            info("Patched LaunchOptions =", tail)
+    else:
+        info("Proceeding without LaunchOptions (none captured).")
 
-    appid = compute_nonsteam_appid(entry["exe"], entry["appname"])
-    rungameid = to_rungameid(appid)
-    info(f"Computed AppID: {appid}  (rungameid: {rungameid})")
+    appid = entry["appid"] + (1<<32)
+    info(f"Computed AppID: {appid}")
     set_compat_tool(config_vdf, appid, args.proton, args.priority, args.dry_run)
     info(f"Set CompatToolMapping for AppID {appid} -> '{args.proton}' in {config_vdf}")
 
@@ -425,7 +419,7 @@ def run_injection(args):
     }
     save_config(state)
     info(f"Saved config -> {CONF_PATH}")
-    info("Done. Restart Steam to load the new shortcut and Proton mapping.")
+    info("Done. Steam should have the new shortcut and Proton mapping when you next start it.")
     info(f"Log file: {LOG_PATH}")
 
 def run_status():
