@@ -27,7 +27,6 @@ Quickstart:
   python3 -m pip install --user vdf psutil
   python3 vanguard_proton_helper.py --debug
 """
-#!/usr/bin/env python3
 import os, sys, argparse, shutil, time, json, zlib, traceback
 from pathlib import Path
 from datetime import datetime
