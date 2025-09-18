@@ -447,3 +447,6 @@ def main():
     except Exception as e:
         err("Unhandled error:", str(e))
         tb = traceback.format
+
+if __name__ == "__main__":
+    main()
