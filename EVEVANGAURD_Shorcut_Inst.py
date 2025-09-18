@@ -120,14 +120,28 @@ def find_userdata_roots(steam_root_hint: str|None):
             out.append((r, ud))
     return out
 
-def find_profile_shortcuts(userdata_dir: Path):
-    out = []
-    for p in userdata_dir.iterdir():
-        if p.is_dir() and p.name.isdigit():
-            s = p / "config" / "shortcuts.vdf"
-            if s.exists():
-                out.append((p.name, s))
-    return out
+def select_profile(userdata_dir: Path):
+    profiles = list(userdata_dir.iterdir())
+    if len(profiles) > 1:
+        info("Select which Steam account to add the shortcut for:")
+        for idx, profile_path in enumerate(profiles):
+            with (profile_path / "config" / "localconfig.vdf").open("r") as fh:
+                profile_name = vdf.load(fh)["UserLocalConfigStore"]["friends"]["PersonaName"]
+            info(f"  {idx}: {profile_name} (Steam ID: {profile_path.name})")
+        selected_index_str = input("Enter the leftmost number for the account you want: ").strip()
+        try:
+            selected_index = int(selected_index_str)
+            if selected_index < 0 or selected_index >= len(profiles):
+                raise Exception
+        except:
+            err("Couldn't parse selected profile number")
+            sys.exit(2)
+
+        profile_path = profiles[selected_index]
+    else:
+        profile_path = profiles[0]
+
+    return profile_path
 
 def backup(path: Path):
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -173,8 +187,11 @@ def make_shortcut(name, exe, startdir, icon="", launch_opts=""):
     }
 
 def inject_shortcut(shortcuts_path: Path, name, exe, startdir, icon="", launch_opts="", dry=False):
-    obj = read_shortcuts(shortcuts_path)
-    container = find_numeric_container(obj) or obj.get("shortcuts") or obj
+    if shortcuts_path.exists():
+        shortcuts_root = read_shortcuts(shortcuts_path)
+    else:
+        shortcuts_root = {"shortcuts": {}}
+    container = find_numeric_container(shortcuts_root) or shortcuts_root.get("shortcuts") or shortcuts_root
     idx = next_index(container)
     entry = make_shortcut(name, exe, startdir, icon, launch_opts)
     container[idx] = entry
@@ -183,7 +200,7 @@ def inject_shortcut(shortcuts_path: Path, name, exe, startdir, icon="", launch_o
         info(json.dumps(entry, indent=2))
         return idx, entry
     backup(shortcuts_path)
-    write_shortcuts(shortcuts_path, obj)
+    write_shortcuts(shortcuts_path, shortcuts_root)
     return idx, entry
 
 def read_text_vdf(path: Path):
@@ -336,11 +353,10 @@ def run_injection(args):
                 sys.exit(2)
             roots = find_userdata_roots(guess)
         steam_root, userdata = roots[0]
-        profiles = find_profile_shortcuts(userdata)
-        if not profiles:
-            err("No shortcuts.vdf found under:", str(userdata))
-            sys.exit(3)
-        profile_id, shortcuts_path = profiles[0]
+        profile_path = select_profile(userdata)
+        profile_id = profile_path.name
+
+        shortcuts_path = profile_path / "config" / "shortcuts.vdf"
         config_vdf = steam_root / "config" / "config.vdf"
 
     info(f"Using Steam profile {profile_id}")
