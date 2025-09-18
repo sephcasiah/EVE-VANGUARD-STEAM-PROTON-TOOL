@@ -99,29 +99,15 @@ def err(*a, **k):
     print("ERROR:", msg, **k)
     _write_log_line("ERROR: " + msg)
 
-
-def is_steam_running(steam_root_hint: str|None=None):
-    names = {"steam", "steam.sh"}
-    found = []
-    for proc in psutil.process_iter(attrs=("name","exe","cmdline","pid","uids")):
+def is_steam_running():
+    for p in psutil.process_iter(attrs=("name","cmdline")):
         try:
-            n = (proc.info.get("name") or "").lower()
-            if n in names:
-                found.append((proc.info.get("pid"), n))
-                continue
-            exep = proc.info.get("exe") or ""
-            base = os.path.basename(exep).lower()
-            if base in names:
-                found.append((proc.info.get("pid"), base))
-                continue
-            if n == "steamwebhelper" or base == "steamwebhelper":
-                found.append((proc.info.get("pid"), "steamwebhelper"))
+            n = (p.info.get("name") or "").lower()
+            if "steam" in n: return True
+            if any("steam" in (c or "").lower() for c in (p.info.get("cmdline") or [])): return True
         except psutil.Error:
-            continue
-    running = any(name in {"steam","steam.sh"} for _, name in found)
-    if DEBUG and found:
-        info("Steam process scan:", found, "=> running:", running)
-    return running
+            pass
+    return False
 
 def find_userdata_roots(steam_root_hint: str|None):
     roots = []
@@ -139,8 +125,8 @@ def find_profile_shortcuts(userdata_dir: Path):
     for p in userdata_dir.iterdir():
         if p.is_dir() and p.name.isdigit():
             s = p / "config" / "shortcuts.vdf"
-            if s.exists():
-                out.append((p.name, s))
+            # include profile even if file doesn't exist; we'll create it later
+            out.append((p.name, s))
     return out
 
 def backup(path: Path):
@@ -151,6 +137,11 @@ def backup(path: Path):
     return bp
 
 def read_shortcuts(path: Path):
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        # initialize empty shortcuts structure
+        return {"shortcuts": {}}
     with path.open("rb") as fh:
         return vdf.binary_load(fh)
 
@@ -188,7 +179,10 @@ def make_shortcut(name, exe, startdir, icon="", launch_opts=""):
 
 def inject_shortcut(shortcuts_path: Path, name, exe, startdir, icon="", launch_opts="", dry=False):
     obj = read_shortcuts(shortcuts_path)
-    container = find_numeric_container(obj) or obj.get("shortcuts") or obj
+    container = find_numeric_container(obj) or obj.get("shortcuts")
+    if container is None:
+        obj["shortcuts"] = {}
+        container = obj["shortcuts"]
     idx = next_index(container)
     entry = make_shortcut(name, exe, startdir, icon, launch_opts)
     container[idx] = entry
@@ -251,7 +245,10 @@ def set_compat_tool(config_vdf_path: Path, appid: int, tool_name: str, priority:
         info("DRY RUN: would write CompatToolMapping in", str(config_vdf_path))
         info(f'{key}: {mapping[key]}')
         return
-    backup(config_vdf_path)
+    if config_vdf_path.exists():
+        backup(config_vdf_path)
+    if not config_vdf_path.parent.exists():
+        config_vdf_path.parent.mkdir(parents=True, exist_ok=True)
     write_text_vdf(config_vdf_path, root)
 
 def get_compat_tool(config_vdf_path: Path, appid: int):
@@ -311,7 +308,10 @@ def print_status(saved: dict, steam_root: Path|None, profile_id: str|None, short
     try:
         if shortcuts_path and shortcuts_path.exists():
             obj = read_shortcuts(shortcuts_path)
-            container = find_numeric_container(obj) or obj.get("shortcuts") or obj
+            container = find_numeric_container(obj) or obj.get("shortcuts")
+    if container is None:
+        obj["shortcuts"] = {}
+        container = obj["shortcuts"]
             for k, ent in container.items():
                 if isinstance(ent, dict) and ent.get("appname") == name:
                     exe = ent.get("exe","")
@@ -326,7 +326,7 @@ def print_status(saved: dict, steam_root: Path|None, profile_id: str|None, short
         err("Status check failed:", str(e))
 
 def run_injection(args):
-    if is_steam_running(args.steam_root) and not args.dry_run and not args.force:
+    if is_steam_running() and not args.dry_run:
         err("Please EXIT Steam before running.")
         sys.exit(1)
 
@@ -338,7 +338,7 @@ def run_injection(args):
     shortcuts_path = Path(saved.get("shortcuts_vdf")) if saved.get("shortcuts_vdf") else None
     config_vdf = Path(saved.get("config_vdf")) if saved.get("config_vdf") else None
 
-    if not (steam_root and shortcuts_path and config_vdf and steam_root.exists() and shortcuts_path.exists() and config_vdf.exists()):
+    if not (steam_root and shortcuts_path and config_vdf and steam_root.exists()):
         roots = find_userdata_roots(args.steam_root)
         if not roots:
             if args.no_prompt:
@@ -385,7 +385,10 @@ def run_injection(args):
         tail = scan_vanguard_args(timeout=args.timeout)
         if tail:
             obj = read_shortcuts(shortcuts_path)
-            container = find_numeric_container(obj) or obj.get("shortcuts") or obj
+            container = find_numeric_container(obj) or obj.get("shortcuts")
+    if container is None:
+        obj["shortcuts"] = {}
+        container = obj["shortcuts"]
             if idx in container:
                 container[idx]["LaunchOptions"] = tail
                 backup(shortcuts_path)
@@ -442,12 +445,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="Preview only")
     ap.add_argument("--no-prompt", action="store_true", help="Disable prompts; fail if discovery incomplete")
     ap.add_argument("--status", action="store_true", help="Show current shortcut/mapping and exit")
-    ap.add_argument("--force", action="store_true", help="Bypass Steam-running check")
     ap.add_argument("--debug", action="store_true", help="Verbose console output")
     args = ap.parse_args()
     DEBUG = args.debug
 
-    info("DISCLAIMER: This tool does NOT modify CCP software. All rights belong to CCP hf.")
+    info(DISCLAIMER)
     info(f"{APP_NAME} starting…")
     info(f"Log file: {LOG_PATH}")
 
@@ -460,9 +462,4 @@ def main():
         err("Interrupted by user.")
     except Exception as e:
         err("Unhandled error:", str(e))
-        _write_log_line(traceback.format_exc())
-        err("Traceback written to log file:", str(LOG_PATH))
-        sys.exit(99)
-
-if __name__ == "__main__":
-    main()
+        tb = traceback.format
