@@ -52,7 +52,7 @@ DEFAULT_REL_EXE = "drive_c/CCP/EVE/eve-vanguard/live/WindowsClient/start_protect
 DEFAULT_PROTON = "proton_experimental"
 DEFAULT_PRIORITY = 250
 
-STATE_DIR = Path.home() / ".config" / "EVEVANGUARD_Shorcut_Inst"
+STATE_DIR = Path.home() / ".config" / "EVEVANGUARD_Shortcut_Inst"
 LOGS_DIR = STATE_DIR / "logs"
 CONF_PATH = STATE_DIR / "config.json"
 LOG_PATH = None
@@ -157,7 +157,7 @@ def write_shortcuts(path: Path, obj):
     if not path.parent.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as fh:
-        vdf.binary_dump(fh, obj)
+        vdf.binary_dump(obj, fh)
 
 def find_numeric_container(node):
     if isinstance(node, dict):
