@@ -27,6 +27,7 @@ Quickstart:
   python3 -m pip install --user vdf psutil
   python3 vanguard_proton_helper.py --debug
 """
+#!/usr/bin/env python3
 import os, sys, argparse, shutil, time, json, zlib, traceback
 from pathlib import Path
 from datetime import datetime
@@ -99,15 +100,29 @@ def err(*a, **k):
     print("ERROR:", msg, **k)
     _write_log_line("ERROR: " + msg)
 
-def is_steam_running():
-    for p in psutil.process_iter(attrs=("name","cmdline")):
+
+def is_steam_running(steam_root_hint: str|None=None):
+    names = {"steam", "steam.sh"}
+    found = []
+    for proc in psutil.process_iter(attrs=("name","exe","cmdline","pid","uids")):
         try:
-            n = (p.info.get("name") or "").lower()
-            if "steam" in n: return True
-            if any("steam" in (c or "").lower() for c in (p.info.get("cmdline") or [])): return True
+            n = (proc.info.get("name") or "").lower()
+            if n in names:
+                found.append((proc.info.get("pid"), n))
+                continue
+            exep = proc.info.get("exe") or ""
+            base = os.path.basename(exep).lower()
+            if base in names:
+                found.append((proc.info.get("pid"), base))
+                continue
+            if n == "steamwebhelper" or base == "steamwebhelper":
+                found.append((proc.info.get("pid"), "steamwebhelper"))
         except psutil.Error:
-            pass
-    return False
+            continue
+    running = any(name in {"steam","steam.sh"} for _, name in found)
+    if DEBUG and found:
+        info("Steam process scan:", found, "=> running:", running)
+    return running
 
 def find_userdata_roots(steam_root_hint: str|None):
     roots = []
@@ -120,28 +135,14 @@ def find_userdata_roots(steam_root_hint: str|None):
             out.append((r, ud))
     return out
 
-def select_profile(userdata_dir: Path):
-    profiles = list(userdata_dir.iterdir())
-    if len(profiles) > 1:
-        info("Select which Steam account to add the shortcut for:")
-        for idx, profile_path in enumerate(profiles):
-            with (profile_path / "config" / "localconfig.vdf").open("r") as fh:
-                profile_name = vdf.load(fh)["UserLocalConfigStore"]["friends"]["PersonaName"]
-            info(f"  {idx}: {profile_name} (Steam ID: {profile_path.name})")
-        selected_index_str = input("Enter the leftmost number for the account you want: ").strip()
-        try:
-            selected_index = int(selected_index_str)
-            if selected_index < 0 or selected_index >= len(profiles):
-                raise Exception
-        except:
-            err("Couldn't parse selected profile number")
-            sys.exit(2)
-
-        profile_path = profiles[selected_index]
-    else:
-        profile_path = profiles[0]
-
-    return profile_path
+def find_profile_shortcuts(userdata_dir: Path):
+    out = []
+    for p in userdata_dir.iterdir():
+        if p.is_dir() and p.name.isdigit():
+            s = p / "config" / "shortcuts.vdf"
+            if s.exists():
+                out.append((p.name, s))
+    return out
 
 def backup(path: Path):
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -187,11 +188,8 @@ def make_shortcut(name, exe, startdir, icon="", launch_opts=""):
     }
 
 def inject_shortcut(shortcuts_path: Path, name, exe, startdir, icon="", launch_opts="", dry=False):
-    if shortcuts_path.exists():
-        shortcuts_root = read_shortcuts(shortcuts_path)
-    else:
-        shortcuts_root = {"shortcuts": {}}
-    container = find_numeric_container(shortcuts_root) or shortcuts_root.get("shortcuts") or shortcuts_root
+    obj = read_shortcuts(shortcuts_path)
+    container = find_numeric_container(obj) or obj.get("shortcuts") or obj
     idx = next_index(container)
     entry = make_shortcut(name, exe, startdir, icon, launch_opts)
     container[idx] = entry
@@ -200,7 +198,7 @@ def inject_shortcut(shortcuts_path: Path, name, exe, startdir, icon="", launch_o
         info(json.dumps(entry, indent=2))
         return idx, entry
     backup(shortcuts_path)
-    write_shortcuts(shortcuts_path, shortcuts_root)
+    write_shortcuts(shortcuts_path, obj)
     return idx, entry
 
 def read_text_vdf(path: Path):
@@ -329,7 +327,7 @@ def print_status(saved: dict, steam_root: Path|None, profile_id: str|None, short
         err("Status check failed:", str(e))
 
 def run_injection(args):
-    if is_steam_running() and not args.dry_run:
+    if is_steam_running(args.steam_root) and not args.dry_run and not args.force:
         err("Please EXIT Steam before running.")
         sys.exit(1)
 
@@ -353,10 +351,11 @@ def run_injection(args):
                 sys.exit(2)
             roots = find_userdata_roots(guess)
         steam_root, userdata = roots[0]
-        profile_path = select_profile(userdata)
-        profile_id = profile_path.name
-
-        shortcuts_path = profile_path / "config" / "shortcuts.vdf"
+        profiles = find_profile_shortcuts(userdata)
+        if not profiles:
+            err("No shortcuts.vdf found under:", str(userdata))
+            sys.exit(3)
+        profile_id, shortcuts_path = profiles[0]
         config_vdf = steam_root / "config" / "config.vdf"
 
     info(f"Using Steam profile {profile_id}")
@@ -444,11 +443,12 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="Preview only")
     ap.add_argument("--no-prompt", action="store_true", help="Disable prompts; fail if discovery incomplete")
     ap.add_argument("--status", action="store_true", help="Show current shortcut/mapping and exit")
+    ap.add_argument("--force", action="store_true", help="Bypass Steam-running check")
     ap.add_argument("--debug", action="store_true", help="Verbose console output")
     args = ap.parse_args()
     DEBUG = args.debug
 
-    info(DISCLAIMER)
+    info("DISCLAIMER: This tool does NOT modify CCP software. All rights belong to CCP hf.")
     info(f"{APP_NAME} starting…")
     info(f"Log file: {LOG_PATH}")
 
