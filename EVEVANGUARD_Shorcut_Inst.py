@@ -377,24 +377,28 @@ def run_injection(args):
         prefix = input("Enter Vanguard Proton prefix: ").strip()
         exe_rel = input(f"Enter path to Vanguard exe relative to prefix (e.g. {DEFAULT_REL_EXE}): ").strip()
 
+    if not args.dry_run:
+        tail = scan_vanguard_args(timeout=args.timeout)
+
+    info("Waiting for Steam to exit before continuing")
+    while is_steam_running(args.steam_root) and not args.dry_run and not args.force:
+        time.sleep(1)
+
     exe_rel = exe_rel.replace("\\","/")
     startdir = str((Path(prefix).expanduser() / Path(exe_rel).parent).resolve())
-
     idx, entry = inject_shortcut(shortcuts_path, args.name, exe_rel, startdir, args.icon, "", args.dry_run)
     info(f"Shortcut injected (index {idx}) at {shortcuts_path}")
 
-    if not args.dry_run:
-        tail = scan_vanguard_args(timeout=args.timeout)
-        if tail:
-            obj = read_shortcuts(shortcuts_path)
-            container = find_numeric_container(obj) or obj.get("shortcuts") or obj
-            if idx in container:
-                container[idx]["LaunchOptions"] = tail
-                backup(shortcuts_path)
-                write_shortcuts(shortcuts_path, obj)
-                info("Patched LaunchOptions =", tail)
-        else:
-            info("Proceeding without LaunchOptions (none captured).")
+    if tail:
+        obj = read_shortcuts(shortcuts_path)
+        container = find_numeric_container(obj) or obj.get("shortcuts") or obj
+        if idx in container:
+            container[idx]["LaunchOptions"] = tail
+            backup(shortcuts_path)
+            write_shortcuts(shortcuts_path, obj)
+            info("Patched LaunchOptions =", tail)
+    else:
+        info("Proceeding without LaunchOptions (none captured).")
 
     appid = entry["appid"] + (1<<32)
     info(f"Computed AppID: {appid}")
