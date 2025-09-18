@@ -27,7 +27,6 @@ Quickstart:
   python3 -m pip install --user vdf psutil
   python3 vanguard_proton_helper.py --debug
 """
-#!/usr/bin/env python3
 import os, sys, argparse, shutil, time, json, zlib, traceback
 from pathlib import Path
 from datetime import datetime
@@ -444,9 +443,11 @@ def main():
         run_injection(args)
     except KeyboardInterrupt:
         err("Interrupted by user.")
-    except Exception as e:
+        except Exception as e:
         err("Unhandled error:", str(e))
-        tb = traceback.format
+        _write_log_line(traceback.format_exc())
+        err("Traceback written to log file:", str(LOG_PATH))
+        sys.exit(99)
 
 if __name__ == "__main__":
     main()
