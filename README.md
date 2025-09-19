@@ -36,7 +36,7 @@ It auto-discovers the correct Proton prefix across **all Steam libraries**, writ
 2. Run the installer:
 
    ```
-   python3 EVEVANGUARD_Shorcut_Inst.py --debug
+   python3 VGI.py --debug
    ```
 3. When it prints **“Waiting to capture Vanguard runtime args …”**, launch Vanguard once **from the official EVE Online launcher**.
    The script will detect the Shipping process and capture the tail args (optional).
@@ -51,7 +51,7 @@ You can also pass the prefix explicitly (see examples).
 ## Usage
 
 ```
-python3 EVEVANGUARD_Shorcut_Inst.py [OPTIONS]
+python3 VGI.py [OPTIONS]
 ```
 
 **Options:**
@@ -79,13 +79,13 @@ python3 EVEVANGUARD_Shorcut_Inst.py [OPTIONS]
 **Auto-discover everything (recommended):**
 
 ```
-python3 EVEVANGUARD_Shorcut_Inst.py --debug
+python3 VGI.py --debug
 ```
 
 **Explicit external library + EAC path:**
 
 ```
-python3 EVEVANGUARD_Shorcut_Inst.py --debug \
+python3 VGI.py --debug \
   --compatdata-id 8500 \
   --prefix "/mnt/drive/SteamLibrary/steamapps/compatdata/8500/pfx" \
   --exe "drive_c/CCP/EVE/eve-vanguard/live/WindowsClient/start_protected_game.exe"
@@ -94,13 +94,13 @@ python3 EVEVANGUARD_Shorcut_Inst.py --debug \
 **Just check what’s installed/mapped:**
 
 ```
-python3 EVEVANGUARD_Shorcut_Inst.py --status
+python3 VGI.py --status
 ```
 
 **Preview without writing:**
 
 ```
-python3 EVEVANGUARD_Shorcut_Inst.py --dry-run --debug
+python3 VGI.py --dry-run --debug
 ```
 
 ---
@@ -158,7 +158,7 @@ Backups are created next to the original file, e.g. `shortcuts.vdf.bak.<timestam
 If problems persist, include:
 
 * Script log (`~/.config/EVEVANGUARD_Shortcut_Inst/logs/run-*.log`)
-* Output of `python3 EVEVANGUARD_Shorcut_Inst.py --status`
+* Output of `python3 VGI.py --status`
 * Proton version used and any `~/steam-*.log`
 
 ---
