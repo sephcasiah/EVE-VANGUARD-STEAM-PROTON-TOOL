@@ -43,8 +43,8 @@ It auto-discovers the correct Proton prefix across **all Steam libraries**, writ
 4. The script finishes and prints the log path.
    **Start Steam** and launch the new **EVE Vanguard** shortcut.
 
-> If your game is on an external drive, the script should auto-find the correct prefix (e.g. `/mnt/.../SteamLibrary/steamapps/compatdata/8500/pfx`).
-> You can also pass the prefix explicitly (see examples).
+If your game is on an external drive, the script should auto-find the correct prefix (e.g. `/mnt/.../SteamLibrary/steamapps/compatdata/8500/pfx`).
+You can also pass the prefix explicitly (see examples).
 
 ---
 
@@ -120,8 +120,6 @@ Backups are created next to the original file, e.g. `shortcuts.vdf.bak.<timestam
 
 * Config: `~/.config/EVEVANGUARD_Shortcut_Inst/config.json`
 * Logs: `~/.config/EVEVANGUARD_Shortcut_Inst/logs/run-YYYYMMDD-HHMMSS.log`
-
-> Note: The script’s program name keeps the historical `Shorcut` typo for continuity; the state folder uses `Shortcut` (spelled correctly).
 
 ---
 
