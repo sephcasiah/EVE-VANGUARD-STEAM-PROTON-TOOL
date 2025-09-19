@@ -1,249 +1,496 @@
 #!/usr/bin/env python3
-# EVE Vanguard: capture Shipping.exe args -> save to a Non-Steam/Proton shortcut (Linux)
-import os, sys, time, struct, subprocess, argparse
+"""
+Eve: Vanguard Steam Shortcut "Installer"
+
+DISCLAIMER
+- This tool does NOT modify CCP's EVE Vanguard client, launcher, or any CCP software.
+- All trademarks and copyrights for EVE, EVE Vanguard, and CCP products belong to CCP hf.
+- This tool only edits your local Steam configuration (shortcuts/config .vdf files) to add a Non-Steam entry and set a Proton mapping.
+- Use at your own risk; your mileage may vary. Do NOT contact CCP for support regarding this tool.
+- For issues, contact the tool author/maintainer (not CCP).
+
+Steps performed:
+1) Locate Steam userdata and pick first profile (or --interactive to choose).
+2) Backup and inject a Non-Steam "EVE Vanguard" shortcut into shortcuts.vdf.
+3) (Optional) Watch for a running Vanguard process and capture args to LaunchOptions.
+4) Compute non-Steam AppID and write Proton mapping (CompatToolMapping) to config.vdf.
+5) Print results; user restarts Steam to apply.
+
+Steps performed:
+1) Locate Steam + profile, and auto-discover Vanguard prefix/exe (prompt only if missing).
+2) Backup VDFs; inject Non-Steam "EVE Vanguard" shortcut.
+3) Auto-capture Vanguard runtime args from the running client and set LaunchOptions.
+4) Compute non-Steam AppID; set Proton mapping in config.vdf.
+5) Persist config for future runs; write a verbose log file; print summary.
+
+Quickstart:
+  python3 -m pip install --user vdf psutil
+  python3 vanguard_proton_helper.py --debug
+"""
+import os, sys, argparse, shutil, time, json, traceback, random
 from pathlib import Path
+from datetime import datetime
 
+try:
+    import vdf
+    import psutil
+except Exception:
+    print("Missing deps. Install with:\n  python3 -m pip install --user vdf psutil")
+    sys.exit(1)
 
+DEBUG = False
+APP_NAME = "EVEVANGUARD_Shorcut_Inst"
 DEFAULT_SHORTCUT_NAME = "EVE Vanguard"
-# Target of the Non-Steam shortcut (Windows path seen by Proton/Wine)
-WIN_TARGET = r'C:\Program Files\CCP\EVE\Eve-vanguard\live\WindowsClient\EVEVanguardClient-Win64-Shipping.exe'
-PROTON_MAPPING = "proton_experimental"  # You can still override in Steam → Properties → Compatibility
-PROC_NAME = "EVEVanguardClient-Win64-Shipping.exe"
-SCAN_INTERVAL = 1.0
-TIMEOUT_SEC = 1800
+DEFAULT_STEAM_ROOTS = [
+    Path.home() / ".local" / "share" / "Steam",
+    Path.home() / ".steam" / "steam",
+    Path.home() / ".var" / "app" / "com.valvesoftware.Steam" / "data" / "Steam",
+    Path("/usr/local/share/steam"),
+]
 
-def find_steam_root() -> Path:
-    cands = [
-        Path.home() / ".local/share/Steam",
-        Path.home() / ".steam/steam",
-        Path.home() / ".var/app/com.valvesoftware.Steam/.local/share/Steam",  # Flatpak
-    ]
-    for p in cands:
-        if (p / "steamapps").is_dir():
-            return p
-    raise FileNotFoundError("Could not find Steam root in standard locations.")
+DEFAULT_COMPATDATA_ID = "8500"
+DEFAULT_REL_EXE = "drive_c/CCP/EVE/eve-vanguard/live/WindowsClient/start_protected_game.exe"
+DEFAULT_PROTON = "proton_experimental"
+DEFAULT_PRIORITY = 250
 
-def list_profiles(steam_root: Path):
-    u = steam_root / "userdata"
-    return sorted([d for d in u.iterdir() if d.is_dir() and d.name.isdigit()], key=lambda p: p.name)
+STATE_DIR = Path.home() / ".config" / "EVEVANGUARD_Shortcut_Inst"
+LOGS_DIR = STATE_DIR / "logs"
+CONF_PATH = STATE_DIR / "config.json"
+LOG_PATH = None
 
-def pick_profile(steam_root: Path, force_id: str | None):
-    profs = list_profiles(steam_root)
-    if not profs:
-        raise RuntimeError("No Steam profiles under userdata/")
-    if force_id:
-        m = [p for p in profs if p.name == force_id]
-        if not m: raise RuntimeError(f"Profile {force_id} not found.")
-        print(f"[+] Using Steam profile {force_id}")
-        return m[0]
-    if len(profs) == 1:
-        print(f"[+] Using Steam profile {profs[0].name}")
-        return profs[0]
-    print("Multiple Steam profiles found:\n")
-    for i,p in enumerate(profs,1): print(f"  [{i}] {p.name}")
-    while True:
-        sel = input("\nSelect a profile number: ").strip()
-        if sel.isdigit() and 1 <= int(sel) <= len(profs):
-            pick = profs[int(sel)-1]
-            print(f"[+] Using Steam profile {pick.name}")
-            return pick
-        print("Invalid selection.")
+DISCLAIMER = (
+    "DISCLAIMER: This tool does NOT modify CCP's EVE Vanguard client/launcher. "
+    "All rights for EVE / EVE Vanguard belong to CCP hf. "
+    "It only edits local Steam config (shortcuts.vdf, config.vdf). "
+    "Use at your own risk; contact the tool maintainer for support, not CCP."
+)
 
-# ---- Steam running guard ----
-def is_steam_running() -> bool:
-    for pid in filter(str.isdigit, os.listdir("/proc")):
+def ensure_state_dirs():
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+def new_log_file():
+    global LOG_PATH
+    ensure_state_dirs()
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    LOG_PATH = LOGS_DIR / f"run-{ts}.log"
+    return LOG_PATH
+
+def _write_log_line(s: str):
+    if LOG_PATH:
         try:
-            with open(f"/proc/{pid}/cmdline","rb") as f:
-                d = f.read().lower()
-            if b"/steam" in d or b"steamwebhelper" in d or b"steam" in d:
-                return True
+            with LOG_PATH.open("a", encoding="utf-8") as fh:
+                fh.write(s + "\n")
         except Exception:
             pass
-    return False
 
-def ensure_steam_closed():
-    if not is_steam_running(): return
-    print("[!] Steam seems to be running. Please close Steam; waiting…")
-    while is_steam_running(): time.sleep(1.0)
-    print("[+] Detected Steam exit.")
+def log(*a, **k):
+    msg = " ".join(str(x) for x in a)
+    if DEBUG:
+        print("[DEBUG]", msg, **k)
+    _write_log_line("[DEBUG] " + msg)
 
-def read_cmdline(pid: str) -> str:
-    with open(f"/proc/{pid}/cmdline","rb") as f:
-        data = f.read()
-    return data.replace(b"\x00", b" ").decode("utf-8", errors="ignore")
+def info(*a, **k):
+    msg = " ".join(str(x) for x in a)
+    print(msg, **k)
+    _write_log_line(msg)
 
-def capture_tail(timeout=TIMEOUT_SEC) -> str:
-    target = PROC_NAME.lower()
-    print(f"[+] Waiting for {PROC_NAME} (timeout {timeout}s)…")
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        for pid in filter(str.isdigit, os.listdir("/proc")):
-            try:
-                cmd = read_cmdline(pid)
-            except Exception:
-                continue
-            low = cmd.lower()
-            i = low.find(target)
-            if i != -1:
-                j = low.find(".exe", i)
-                if j != -1:
-                    j += 4
-                    tail = cmd[j:].strip()
-                    print(f"[+] Captured args tail: {tail!r}")
-                    return tail
-        time.sleep(SCAN_INTERVAL)
-    raise TimeoutError("Timed out waiting for Shipping.exe")
+def err(*a, **k):
+    msg = " ".join(str(x) for x in a)
+    print("ERROR:", msg, **k)
+    _write_log_line("ERROR: " + msg)
 
+def is_steam_running(steam_root_hint: str|None=None):
+    names = {"steam", "steam.sh"}
+    found = []
+    for proc in psutil.process_iter(attrs=("name","exe","cmdline","pid")):
+        try:
+            n = (proc.info.get("name") or "").lower()
+            exep = proc.info.get("exe") or ""
+            base = os.path.basename(exep).lower()
+            if n in names or base in names:
+                found.append((proc.info.get("pid"), base or n))
+        except psutil.Error:
+            continue
+    running = any(name in {"steam","steam.sh"} for _, name in found)
+    if DEBUG and found:
+        info("Steam process scan:", found, "=> running:", running)
+    return running
 
-TYPE_END, TYPE_STRING, TYPE_INT32, TYPE_ARRAY = 0x08, 0x01, 0x02, 0x00
+def find_userdata_roots(steam_root_hint: str|None):
+    roots = []
+    if steam_root_hint:
+        roots.append(Path(steam_root_hint).expanduser())
+    roots += DEFAULT_STEAM_ROOTS
+    out = []
+    for r in roots:
+        ud = r / "userdata"
+        if ud.is_dir():
+            out.append((r, ud))
+    return out
 
-def _rcs(f):
-    b = bytearray()
-    while True:
-        c = f.read(1)
-        if not c: raise EOFError("EOF in cstring")
-        if c == b"\x00": return b.decode("utf-8", "replace")
-        b.extend(c)
+def find_profile_shortcuts(userdata_dir: Path):
+    out = []
+    for p in userdata_dir.iterdir():
+        if p.is_dir() and p.name.isdigit():
+            s = p / "config" / "shortcuts.vdf"
+            out.append((p.name, s)) 
+    return out
 
-def _wcs(f, s: str): f.write(s.encode("utf-8")+b"\x00")
-def _ri(f): return struct.unpack("<i", f.read(4))[0]
-def _wi(f, i): f.write(struct.pack("<i", int(i)))
-
-def _read_node(f):
-    node = {}
-    while True:
-        t = f.read(1)
-        if not t: raise EOFError("EOF reading node")
-        t = t[0]
-        if t == TYPE_END: return node
-        key = _rcs(f)
-        if t == TYPE_STRING: node[key] = ("string", _rcs(f))
-        elif t == TYPE_INT32: node[key] = ("int32", _ri(f))
-        elif t == TYPE_ARRAY: node[key] = ("array", _read_node(f))
-        else: raise ValueError(f"Unknown type: {t}")
-
-def _write_node(f, node: dict):
-    for k,(kind,val) in node.items():
-        if kind=="string":
-            f.write(bytes([TYPE_STRING])); _wcs(f,k); _wcs(f,val)
-        elif kind=="int32":
-            f.write(bytes([TYPE_INT32])); _wcs(f,k); _wi(f,val)
-        elif kind=="array":
-            f.write(bytes([TYPE_ARRAY])); _wcs(f,k); _write_node(f,val)
-        else: raise ValueError(f"Bad kind: {kind}")
-    f.write(bytes([TYPE_END]))
+def backup(path: Path):
+    if not path.exists():
+        return None
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    bp = path.with_name(path.name + f".bak.{ts}")
+    shutil.copy2(path, bp)
+    log("Backup ->", bp)
+    return bp
 
 def read_shortcuts(path: Path):
-    if not path.exists(): return {"shortcuts": ("array", {})}
-    with open(path,"rb") as f: top = _read_node(f)
-    return top
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        return {"shortcuts": {}}
+    with path.open("rb") as fh:
+        return vdf.binary_load(fh)
 
-def write_shortcuts(path: Path, top: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".vdf.tmp")
-    with open(tmp,"wb") as f: _write_node(f, top)
-    if path.exists(): path.replace(path.with_suffix(".vdf.bak"))
-    tmp.replace(path)
+def write_shortcuts(path: Path, obj):
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        vdf.binary_dump(obj, fh)
 
-def ensure_shortcut(top: dict, name: str, exe: str, launch_options: str):
-    if "shortcuts" not in top: top["shortcuts"] = ("array", {})
-    arr = top["shortcuts"][1]
-    target_idx = None
-    for k,v in arr.items():
-        if not k.isdigit(): continue
-        entry = v[1]
-        if entry.get("appname",("string",""))[1] == name:
-            target_idx = k; break
-    if target_idx is None:
-        next_idx = max([int(i) for i in arr.keys() if i.isdigit()] or [-1]) + 1
-        target_idx = str(next_idx)
-        arr[target_idx] = ("array", {})
-    entry = arr[target_idx][1]
-    entry["appname"] = ("string", name)
-    entry["exe"] = ("string", exe)              # Windows path is fine; Proton handles it
-    entry["StartDir"] = ("string", "")
-    entry["icon"] = ("string", "")
-    entry["ShortcutPath"] = ("string", "")
-    entry["LaunchOptions"] = ("string", launch_options)
-    entry["IsHidden"] = ("int32", 0)
-    entry["AllowDesktopConfig"] = ("int32", 1)
-    entry["AllowOverlay"] = ("int32", 1)
-    entry["OpenVR"] = ("int32", 0)
-    entry["Devkit"] = ("int32", 0)
-    entry["DevkitGameID"] = ("string", "")
-    entry["LastPlayTime"] = ("int32", 0)
-    entry["FlatpakAppID"] = ("string", "")
-    # tags
-    entry["tags"] = ("array", {"0": ("string","Games"), "1": ("string","Vanguard")})
+def find_numeric_container(node):
+    if isinstance(node, dict):
+        if node and all(isinstance(k, str) and k.isdigit() for k in node.keys()):
+            return node
+        for v in node.values():
+            if isinstance(v, dict):
+                got = find_numeric_container(v)
+                if got:
+                    return got
+    return None
 
-def set_proton_mapping(config_vdf: Path, shortcut_name: str, tool: str):
-    txt = ""
-    if config_vdf.exists():
-        try: txt = config_vdf.read_text(encoding="utf-8", errors="ignore")
-        except Exception: pass
-    block = '"CompatToolMapping"'
-    if block not in txt:
-        txt = txt.rstrip() + f'\n{block}\n{{\n}}\n'
-    lines, out, inside, replaced = txt.splitlines(), [], False, False
-    for ln in lines:
-        if not inside and ln.strip()==block:
-            inside="open_pending"; out.append(ln); continue
-        if inside=="open_pending":
-            out.append(ln)
-            if ln.strip()=="{": inside=True
-            continue
-        if inside is True:
-            if ln.strip()=="}":
-                if not replaced:
-                    out.append(f'\t"{shortcut_name}"\t"{tool}"'); replaced=True
-                out.append(ln); inside=False; continue
-            if ln.strip().startswith(f'"{shortcut_name}"'):
-                out.append(f'\t"{shortcut_name}"\t"{tool}"'); replaced=True; continue
-        out.append(ln)
-    new = "\n".join(out)
-    config_vdf.parent.mkdir(parents=True, exist_ok=True)
-    config_vdf.write_text(new, encoding="utf-8")
+def next_index(container: dict):
+    nums = [int(k) for k in container.keys() if k.isdigit()]
+    return str((max(nums)+1) if nums else 0)
 
-def parse_args():
-    p = argparse.ArgumentParser(description="Capture Vanguard args and save to a Non-Steam/Proton shortcut.")
-    p.add_argument("--name", default=DEFAULT_SHORTCUT_NAME, help="Shortcut name to update/create.")
-    p.add_argument("--profile", help="Steam profile ID (e.g., 162331869). Prompt if omitted and multiple exist.")
-    p.add_argument("--timeout", type=int, default=TIMEOUT_SEC, help="Seconds to wait for Shipping.exe.")
-    p.add_argument("--no-proton-map", action="store_true", help="Skip writing CompatToolMapping.")
-    return p.parse_args()
+def make_shortcut(name, exe, startdir, icon="", launch_opts=""):
+    return {
+        "appid": random.randint(-2147483648, -1),
+        "appname": name,
+        "exe": exe,
+        "StartDir": startdir,
+        "icon": icon or "",
+        "ShortcutPath": "",
+        "LaunchOptions": launch_opts,
+        "IsHidden": 0,
+        "AllowDesktopConfig": 1,
+        "OpenVR": 0,
+        "tags": {"0": "Non-Steam"},
+    }
+
+def inject_shortcut(shortcuts_path: Path, name, exe, startdir, icon="", launch_opts="", dry=False):
+    obj = read_shortcuts(shortcuts_path)
+    container = find_numeric_container(obj) or obj.get("shortcuts")
+    if container is None:
+        obj["shortcuts"] = {}
+        container = obj["shortcuts"]
+    idx = next_index(container)
+    entry = make_shortcut(name, exe, startdir, icon, launch_opts)
+    container[idx] = entry
+    if dry:
+        info("DRY RUN: would add shortcut at index", idx)
+        info(json.dumps(entry, indent=2))
+        return idx, entry
+    backup(shortcuts_path)
+    write_shortcuts(shortcuts_path, obj)
+    return idx, entry
+
+def read_text_vdf(path: Path):
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8", errors="ignore") as fh:
+        return vdf.load(fh)
+
+def write_text_vdf(path: Path, obj):
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        vdf.dump(obj, fh, pretty=True)
+
+def scan_vanguard_args(timeout=120, poll=2):
+    marker = "EVEVanguardClient-Win64-Shipping.exe"
+    deadline = time.time() + timeout
+    info("Waiting to capture Vanguard runtime args (launch Vanguard via EVE Online launcher)…")
+    while time.time() < deadline:
+        for p in psutil.process_iter(attrs=("pid","cmdline")):
+            try:
+                cmd = p.info.get("cmdline") or []
+                if not cmd:
+                    continue
+                joined = " ".join(cmd)
+                if marker in joined:
+                    tail = joined.split(marker,1)[1].strip()
+                    if tail.startswith('"') and tail.endswith('"'):
+                        tail = tail[1:-1]
+                    info("Captured runtime args:", tail)
+                    return tail
+            except psutil.Error:
+                pass
+        time.sleep(poll)
+    info("No args captured within timeout.")
+    return ""
+
+def set_compat_tool(config_vdf_path: Path, appid: int, tool_name: str, priority: int = DEFAULT_PRIORITY, dry=False):
+    root = {}
+    if config_vdf_path.exists():
+        root = read_text_vdf(config_vdf_path)
+    store = root.setdefault("InstallConfigStore", {}).setdefault("Software", {}).setdefault("Valve", {}).setdefault("Steam", {})
+    mapping = store.setdefault("CompatToolMapping", {})
+    key = str(appid)
+    mapping[key] = {"name": tool_name, "config": "", "Priority": str(priority)}
+    if dry:
+        info("DRY RUN: would write CompatToolMapping in", str(config_vdf_path))
+        info(f'{key}: {mapping[key]}')
+        return
+    if config_vdf_path.exists():
+        backup(config_vdf_path)
+    write_text_vdf(config_vdf_path, root)
+
+def get_compat_tool(config_vdf_path: Path, appid: int):
+    if not config_vdf_path.exists():
+        return None
+    try:
+        root = read_text_vdf(config_vdf_path)
+        mapping = root.get("InstallConfigStore", {}).get("Software", {}).get("Valve", {}).get("Steam", {}).get("CompatToolMapping", {})
+        return mapping.get(str(appid))
+    except Exception:
+        return None
+
+def auto_discover_prefix_and_exe(steam_root: Path):
+    """
+    Prefer Shipping.exe (works better under Proton), fall back to start_protected_game.exe.
+    Returns (prefix_root_str, exe_rel_str) or (None, None).
+    """
+    compat_root = steam_root / "steamapps" / "compatdata" / DEFAULT_COMPATDATA_ID / "pfx"
+    if not compat_root.exists():
+        return None, None
+
+    shipping_name = "EVEVanguardClient-Win64-Shipping.exe"
+    startprot_name = "start_protected_game.exe"
+    search_base = compat_root / "drive_c"
+
+    candidate = None
+    if search_base.exists():
+        for p in search_base.rglob(shipping_name):
+            candidate = p
+            break
+        if not candidate:
+
+            for p in search_base.rglob(startprot_name):
+                candidate = p
+                break
+
+    if candidate:
+        rel = candidate.relative_to(compat_root)
+        return str(compat_root), str(rel).replace("\\","/")
+
+
+    exe_abs = compat_root / DEFAULT_REL_EXE
+    if exe_abs.exists():
+        return str(compat_root), DEFAULT_REL_EXE
+
+    return None, None
+
+def load_saved_config():
+    if not CONF_PATH.exists():
+        return {}
+    try:
+        return json.loads(CONF_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def save_config(d: dict):
+    ensure_state_dirs()
+    with CONF_PATH.open("w", encoding="utf-8") as fh:
+        json.dump(d, fh, indent=2)
+
+def print_status(saved: dict, steam_root: Path|None, profile_id: str|None, shortcuts_path: Path|None, config_vdf: Path|None, name: str):
+    info("=== Status ===")
+    info("Saved config path:", str(CONF_PATH))
+    info("Log file:", str(LOG_PATH) if LOG_PATH else "(none)")
+    if saved:
+        info("Saved config keys:", ", ".join(sorted(saved.keys())))
+    if steam_root:
+        info("Steam root:", str(steam_root))
+    if profile_id:
+        info("Profile ID:", profile_id)
+    if shortcuts_path and shortcuts_path.exists():
+        info("shortcuts.vdf:", str(shortcuts_path))
+    if config_vdf and config_vdf.exists():
+        info("config.vdf:", str(config_vdf))
+    try:
+        if shortcuts_path and shortcuts_path.exists():
+            obj = read_shortcuts(shortcuts_path)
+            container = find_numeric_container(obj) or obj.get("shortcuts") or obj
+            for k, ent in container.items():
+                if isinstance(ent, dict) and ent.get("appname") == name:
+                    appid = ent["appid"]
+                    mapping = get_compat_tool(config_vdf, appid) if config_vdf else None
+                    info(f"Detected shortcut index: {k}")
+                    info(f"Shortcut AppID: {appid}")
+                    info(f"LaunchOptions: {ent.get('LaunchOptions','')!r}")
+                    info(f"Proton mapping: {mapping if mapping else '(none)'}")
+                    break
+    except Exception as e:
+        err("Status check failed:", str(e))
+
+def run_injection(args):
+    if is_steam_running(args.steam_root) and not args.dry_run and not args.force:
+        err("Please EXIT Steam before running.")
+        sys.exit(1)
+
+    saved = load_saved_config()
+    log("Loaded saved config:", json.dumps(saved, indent=2) if saved else "(none)")
+
+    steam_root = Path(saved.get("steam_root")) if saved.get("steam_root") else None
+    profile_id = saved.get("profile_id")
+    shortcuts_path = Path(saved.get("shortcuts_vdf")) if saved.get("shortcuts_vdf") else None
+    config_vdf = Path(saved.get("config_vdf")) if saved.get("config_vdf") else None
+
+    if not (steam_root and shortcuts_path and config_vdf and steam_root.exists()):
+        roots = find_userdata_roots(args.steam_root)
+        if not roots:
+            if args.no_prompt:
+                err("Steam userdata not found and prompting disabled.")
+                sys.exit(2)
+            info("Steam userdata not found automatically.")
+            guess = input("Enter Steam root (e.g. ~/.local/share/Steam): ").strip()
+            if not guess:
+                sys.exit(2)
+            roots = find_userdata_roots(guess)
+        steam_root, userdata = roots[0]
+        profiles = find_profile_shortcuts(userdata)
+        if not profiles:
+            err("No Steam profiles found under:", str(userdata))
+            sys.exit(3)
+        profile_id, shortcuts_path = profiles[0]
+        config_vdf = steam_root / "config" / "config.vdf"
+
+    info(f"Using Steam profile {profile_id}")
+
+    prefix = saved.get("prefix") or args.prefix
+    exe_rel = saved.get("exe_rel") or (args.exe.replace("\\","/") if args.exe else None)
+
+    if not prefix or not exe_rel:
+        auto_prefix, auto_exe = auto_discover_prefix_and_exe(steam_root)
+        if not prefix: prefix = auto_prefix
+        if not exe_rel: exe_rel = auto_exe
+
+    if not prefix or not exe_rel:
+        if args.no_prompt:
+            err("Could not auto-discover Vanguard path and prompting disabled.")
+            sys.exit(5)
+        info("Could not auto-discover Vanguard path.")
+        prefix = input("Enter Vanguard Proton prefix: ").strip()
+        exe_rel = input(f"Enter path to Vanguard exe relative to prefix (e.g. {DEFAULT_REL_EXE}): ").strip()
+
+    tail = ""
+    if not args.dry_run:
+        tail = scan_vanguard_args(timeout=args.timeout)
+
+    info("Waiting for Steam to exit before continuing")
+    while is_steam_running(args.steam_root) and not args.dry_run and not args.force:
+        time.sleep(1)
+
+    exe_rel = exe_rel.replace("\\","/")
+    exe_abs_path = (Path(prefix).expanduser() / exe_rel).resolve()
+    exe_abs = str(exe_abs_path)
+    startdir = str(exe_abs_path.parent)
+
+    idx, entry = inject_shortcut(shortcuts_path, args.name, exe_abs, startdir, args.icon, "", args.dry_run)
+    info(f"Shortcut injected (index {idx}) at {shortcuts_path}")
+
+    if tail:
+        obj = read_shortcuts(shortcuts_path)
+        container = find_numeric_container(obj) or obj.get("shortcuts") or obj
+        if idx in container:
+            container[idx]["LaunchOptions"] = tail
+            backup(shortcuts_path)
+            write_shortcuts(shortcuts_path, obj)
+            info("Patched LaunchOptions =", tail)
+    else:
+        info("Proceeding without LaunchOptions (none captured).")
+
+    appid = entry["appid"] + (1<<32)
+    info(f"Computed AppID: {appid}")
+    set_compat_tool(config_vdf, appid, args.proton, args.priority, args.dry_run)
+    info(f"Set CompatToolMapping for AppID {appid} -> '{args.proton}' in {config_vdf}")
+
+    state = {
+        "steam_root": str(steam_root),
+        "profile_id": profile_id,
+        "shortcuts_vdf": str(shortcuts_path),
+        "config_vdf": str(config_vdf),
+        "prefix": str(prefix),
+        "exe_rel": str(exe_rel),
+        "shortcut_name": args.name,
+        "appid": appid,
+        "proton_tool": args.proton,
+        "priority": args.priority
+    }
+    save_config(state)
+    info(f"Saved config -> {CONF_PATH}")
+    info("Done. Steam should have the new shortcut and Proton mapping when you next start it.")
+    info(f"Log file: {LOG_PATH}")
+
+def run_status():
+    saved = load_saved_config()
+    steam_root = Path(saved["steam_root"]) if "steam_root" in saved else None
+    shortcuts_path = Path(saved["shortcuts_vdf"]) if "shortcuts_vdf" in saved else None
+    config_vdf = Path(saved["config_vdf"]) if "config_vdf" in saved else None
+    profile_id = saved.get("profile_id")
+    print_status(saved, steam_root, profile_id, shortcuts_path, config_vdf, saved.get("shortcut_name", DEFAULT_SHORTCUT_NAME))
+    info(f"Log file: {LOG_PATH}")
 
 def main():
-    args = parse_args()
-    steam_root = find_steam_root()
-    profile_dir = pick_profile(steam_root, args.profile)
+    global DEBUG, LOG_PATH
+    LOG_PATH = new_log_file()
 
-    # 1) Wait for Shipping.exe and capture args tail
-    tail = capture_tail(timeout=args.timeout)  # blocks until found or timeout
+    ap = argparse.ArgumentParser(description=f"{APP_NAME}: inject Steam shortcut, auto-capture args, set Proton; writes logs + config.")
+    ap.add_argument("--steam-root", help="Steam root (e.g. ~/.local/share/Steam)")
+    ap.add_argument("--prefix", help="Proton prefix root")
+    ap.add_argument("--exe", help="Path inside prefix to Vanguard exe")
+    ap.add_argument("--name", default=DEFAULT_SHORTCUT_NAME, help="Shortcut name")
+    ap.add_argument("--icon", default="", help="Icon path")
+    ap.add_argument("--proton", default=DEFAULT_PROTON, help="Steam Play tool")
+    ap.add_argument("--priority", type=int, default=DEFAULT_PRIORITY, help="Compat tool priority")
+    ap.add_argument("--timeout", type=int, default=120, help="Seconds to wait when capturing args")
+    ap.add_argument("--dry-run", action="store_true", help="Preview only")
+    ap.add_argument("--no-prompt", action="store_true", help="Disable prompts; fail if discovery incomplete")
+    ap.add_argument("--status", action="store_true", help="Show current shortcut/mapping and exit")
+    ap.add_argument("--force", action="store_true", help="Bypass Steam-running check")
+    ap.add_argument("--debug", action="store_true", help="Verbose console output")
+    args = ap.parse_args()
+    DEBUG = args.debug
 
-    # 2) Ensure Steam is closed before writing config
-    ensure_steam_closed()
+    info(DISCLAIMER)
+    info(f"{APP_NAME} starting…")
+    info(f"Log file: {LOG_PATH}")
 
-    # 3) Update/Create Non-Steam shortcut with captured args
-    shortcuts = profile_dir / "config" / "shortcuts.vdf"
-    top = read_shortcuts(shortcuts)
-    ensure_shortcut(top, name=args.name, exe=WIN_TARGET, launch_options=tail)
-    write_shortcuts(shortcuts, top)
-    print(f"[+] Wrote Launch Options to shortcut “{args.name}”.")
-    print(f"    File: {shortcuts}")
-
-    # 4) (Optional) Force Proton for this shortcut
-    if not args.no_proton_map:
-        cfg = profile_dir / "config" / "config.vdf"
-        set_proton_mapping(cfg, args.name, PROTON_MAPPING)
-        print(f"[+] Ensured Proton mapping in {cfg}")
-
-    print("\nDone. Start Steam → find your Non-Steam shortcut → launch Vanguard.\n"
-          "If you don’t see the shortcut, restart Steam.")
+    try:
+        if args.status:
+            run_status()
+            return
+        run_injection(args)
+    except KeyboardInterrupt:
+        err("Interrupted by user.")
+    except Exception as e:
+        err("Unhandled error:", str(e))
+        _write_log_line(traceback.format_exc())
+        err("Traceback written to log file:", str(LOG_PATH))
+        sys.exit(99)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nAborted."); sys.exit(130)
-    except Exception as e:
-        print(f"ERROR: {e}"); sys.exit(1)
+    main()
