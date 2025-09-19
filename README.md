@@ -173,8 +173,10 @@ If problems persist, include:
 
 ## Security & Privacy
 
-* No network calls.
+* No network calls. Will not trip Anti-Cheat!
 * Only touches local Steam config files and the tool’s own config/logs.
 * Captured runtime args are stored in the shortcut’s `LaunchOptions` and logs.
 
+## Credit
 
+Big props to the handful of testers and to Prommah for being such a big help!
