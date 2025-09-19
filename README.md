@@ -118,8 +118,8 @@ Backups are created next to the original file, e.g. `shortcuts.vdf.bak.<timestam
 
 **State & logs:**
 
-* Config: `~/.config/EVEVANGUARD_Shortcut_Inst/config.json`
-* Logs: `~/.config/EVEVANGUARD_Shortcut_Inst/logs/run-YYYYMMDD-HHMMSS.log`
+* Config: `~/.config/VGI/config.json`
+* Logs: `~/.config/VGI/logs/run-YYYYMMDD-HHMMSS.log`
 
 ---
 
@@ -157,7 +157,7 @@ Backups are created next to the original file, e.g. `shortcuts.vdf.bak.<timestam
 
 If problems persist, include:
 
-* Script log (`~/.config/EVEVANGUARD_Shortcut_Inst/logs/run-*.log`)
+* Script log (`~/.config/VGI/logs/run-*.log`)
 * Output of `python3 VGI.py --status`
 * Proton version used and any `~/steam-*.log`
 
@@ -167,7 +167,7 @@ If problems persist, include:
 
 * Delete the Non-Steam shortcut from Steam’s UI.
 * (Optional) Remove the specific `CompatToolMapping` entry for the Non-Steam AppID from `config.vdf`.
-* You can also delete `~/.config/EVEVANGUARD_Shortcut_Inst/` to clear saved config/logs.
+* You can also delete `~/.config/VGI/` to clear saved config/logs.
 
 ---
 
