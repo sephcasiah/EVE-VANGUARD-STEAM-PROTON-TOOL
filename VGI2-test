@@ -39,7 +39,7 @@ except Exception:
     sys.exit(1)
 
 DEBUG = False
-APP_NAME = "EVEVANGUARD_Shorcut_Inst"
+APP_NAME = "EVEVANGUARD_Shorcut_Inst"  
 DEFAULT_SHORTCUT_NAME = "EVE Vanguard"
 DEFAULT_STEAM_ROOTS = [
     Path.home() / ".local" / "share" / "Steam",
@@ -83,38 +83,33 @@ def _write_log_line(s: str):
         except Exception:
             pass
 
-def log(*a, **k):
+def log(*a):
     msg = " ".join(str(x) for x in a)
     if DEBUG:
-        print("[DEBUG]", msg, **k)
+        print("[DEBUG]", msg)
     _write_log_line("[DEBUG] " + msg)
 
-def info(*a, **k):
+def info(*a):
     msg = " ".join(str(x) for x in a)
-    print(msg, **k)
+    print(msg)
     _write_log_line(msg)
 
-def err(*a, **k):
+def err(*a):
     msg = " ".join(str(x) for x in a)
-    print("ERROR:", msg, **k)
+    print("ERROR:", msg)
     _write_log_line("ERROR: " + msg)
 
 def is_steam_running(steam_root_hint: str|None=None):
     names = {"steam", "steam.sh"}
-    found = []
     for proc in psutil.process_iter(attrs=("name","exe","cmdline","pid")):
         try:
             n = (proc.info.get("name") or "").lower()
-            exep = proc.info.get("exe") or ""
-            base = os.path.basename(exep).lower()
+            base = os.path.basename((proc.info.get("exe") or "")).lower()
             if n in names or base in names:
-                found.append((proc.info.get("pid"), base or n))
+                return True
         except psutil.Error:
             continue
-    running = any(name in {"steam","steam.sh"} for _, name in found)
-    if DEBUG and found:
-        info("Steam process scan:", found, "=> running:", running)
-    return running
+    return False
 
 def find_userdata_roots(steam_root_hint: str|None):
     roots = []
@@ -133,7 +128,7 @@ def find_profile_shortcuts(userdata_dir: Path):
     for p in userdata_dir.iterdir():
         if p.is_dir() and p.name.isdigit():
             s = p / "config" / "shortcuts.vdf"
-            out.append((p.name, s)) 
+            out.append((p.name, s))
     return out
 
 def backup(path: Path):
@@ -178,7 +173,7 @@ def make_shortcut(name, exe, startdir, icon="", launch_opts=""):
     return {
         "appid": random.randint(-2147483648, -1),
         "appname": name,
-        "exe": exe,
+        "exe": exe,  # ABSOLUTE PATH
         "StartDir": startdir,
         "icon": icon or "",
         "ShortcutPath": "",
@@ -218,29 +213,6 @@ def write_text_vdf(path: Path, obj):
     with path.open("w", encoding="utf-8") as fh:
         vdf.dump(obj, fh, pretty=True)
 
-def scan_vanguard_args(timeout=120, poll=2):
-    marker = "EVEVanguardClient-Win64-Shipping.exe"
-    deadline = time.time() + timeout
-    info("Waiting to capture Vanguard runtime args (launch Vanguard via EVE Online launcher)…")
-    while time.time() < deadline:
-        for p in psutil.process_iter(attrs=("pid","cmdline")):
-            try:
-                cmd = p.info.get("cmdline") or []
-                if not cmd:
-                    continue
-                joined = " ".join(cmd)
-                if marker in joined:
-                    tail = joined.split(marker,1)[1].strip()
-                    if tail.startswith('"') and tail.endswith('"'):
-                        tail = tail[1:-1]
-                    info("Captured runtime args:", tail)
-                    return tail
-            except psutil.Error:
-                pass
-        time.sleep(poll)
-    info("No args captured within timeout.")
-    return ""
-
 def set_compat_tool(config_vdf_path: Path, appid: int, tool_name: str, priority: int = DEFAULT_PRIORITY, dry=False):
     root = {}
     if config_vdf_path.exists():
@@ -267,22 +239,99 @@ def get_compat_tool(config_vdf_path: Path, appid: int):
     except Exception:
         return None
 
-def auto_discover_prefix_and_exe(steam_root: Path):
-    compat_root = steam_root / "steamapps" / "compatdata" / DEFAULT_COMPATDATA_ID / "pfx"
-    exe_rel = DEFAULT_REL_EXE
-    exe_abs = compat_root / exe_rel
-    if exe_abs.exists():
-        return str(compat_root), exe_rel
-    candidate = None
-    search_base = compat_root / "drive_c"
+def read_library_folders(steam_root: Path):
+    """
+    Return a list of Steam library roots (paths that contain steamapps/).
+    Always includes the default steam_root.
+    """
+    libs = {steam_root}  
+    lf = steam_root / "config" / "libraryfolders.vdf"
+    if lf.exists():
+        try:
+            data = read_text_vdf(lf)
+            # Newer schema: numbered keys with dicts containing "path"
+            # Older schema: root dict with integers as keys
+            for k, v in (data.get("libraryfolders") or data).items():
+                if isinstance(v, dict) and "path" in v:
+                    p = Path(v["path"])
+                    if (p / "steamapps").exists():
+                        libs.add(p)
+        except Exception as e:
+            log("libraryfolders.vdf parse failed:", e)
+    return list(libs)
+
+def search_compat_pfx_across_libraries(library_roots, compat_id: str):
+
+    for root in library_roots:
+        pfx = root / "steamapps" / "compatdata" / compat_id / "pfx"
+        if pfx.is_dir():
+            return pfx
+    return None
+
+def find_exe_under_pfx(pfx: Path):
+
+    search_base = pfx / "drive_c"
+    shipping = "EVEVanguardClient-Win64-Shipping.exe"
+    startprot = "start_protected_game.exe"
     if search_base.exists():
-        for p in search_base.rglob("start_protected_game.exe"):
-            candidate = p
-            break
-    if candidate:
-        rel = candidate.relative_to(compat_root)
-        return str(compat_root), str(rel).replace("\\","/")
+        for p in search_base.rglob(shipping):
+            return str(p.relative_to(pfx)).replace("\\","/")
+        for p in search_base.rglob(startprot):
+            return str(p.relative_to(pfx)).replace("\\","/")
+    return None
+
+def validate_prefix_and_exe(prefix: str|Path, exe_rel: str|None):
+
+    try:
+        prefix = Path(prefix).expanduser()
+        if not (prefix.is_dir() and (prefix / "drive_c").exists()):
+            return False
+        if not exe_rel:
+            return False
+        exe_abs = prefix / exe_rel
+        return exe_abs.is_file()
+    except Exception:
+        return False
+
+def auto_discover_prefix_and_exe(steam_root: Path, compat_id: str):
+
+    libs = read_library_folders(steam_root)
+    log("Library roots:", ", ".join(str(x) for x in libs))
+    pfx = search_compat_pfx_across_libraries(libs, compat_id)
+    if not pfx:
+        return None, None
+    exe_rel = find_exe_under_pfx(pfx)
+    if not exe_rel:
+     
+        candidate = pfx / DEFAULT_REL_EXE
+        if candidate.is_file():
+            exe_rel = DEFAULT_REL_EXE
+    if exe_rel:
+        return str(pfx), exe_rel
     return None, None
+
+def scan_vanguard_args(timeout=120, poll=2):
+    marker = "EVEVanguardClient-Win64-Shipping.exe"
+    deadline = time.time() + timeout
+    info("Waiting to capture Vanguard runtime args (launch Vanguard via EVE Online launcher)…")
+    while time.time() < deadline:
+        for p in psutil.process_iter(attrs=("pid","cmdline")):
+            try:
+                cmd = p.info.get("cmdline") or []
+                if not cmd:
+                    continue
+                joined = " ".join(cmd)
+                if marker in joined:
+                    tail = joined.split(marker,1)[1].strip()
+                    if tail.startswith('"') and tail.endswith('"'):
+                        tail = tail[1:-1]
+                    info("Captured runtime args:", tail)
+                    return tail
+            except psutil.Error:
+                pass
+        time.sleep(poll)
+    info("No args captured within timeout.")
+    return ""
 
 def load_saved_config():
     if not CONF_PATH.exists():
@@ -329,7 +378,7 @@ def print_status(saved: dict, steam_root: Path|None, profile_id: str|None, short
 
 def run_injection(args):
     if is_steam_running(args.steam_root) and not args.dry_run and not args.force:
-        err("Please EXIT Steam before running.")
+        err("Please EXIT Steam before running (or pass --force).")
         sys.exit(1)
 
     saved = load_saved_config()
@@ -361,22 +410,29 @@ def run_injection(args):
 
     info(f"Using Steam profile {profile_id}")
 
+    compat_id = (args.compatdata_id or saved.get("compatdata_id") or DEFAULT_COMPATDATA_ID).strip()
+
     prefix = saved.get("prefix") or args.prefix
     exe_rel = saved.get("exe_rel") or (args.exe.replace("\\","/") if args.exe else None)
 
-    if not prefix or not exe_rel:
-        auto_prefix, auto_exe = auto_discover_prefix_and_exe(steam_root)
-        if not prefix: prefix = auto_prefix
-        if not exe_rel: exe_rel = auto_exe
-
+    if not validate_prefix_and_exe(prefix or "", exe_rel):
+        prefix, exe_rel = auto_discover_prefix_and_exe(steam_root, compat_id)
+        
     if not prefix or not exe_rel:
         if args.no_prompt:
             err("Could not auto-discover Vanguard path and prompting disabled.")
             sys.exit(5)
         info("Could not auto-discover Vanguard path.")
-        prefix = input("Enter Vanguard Proton prefix: ").strip()
-        exe_rel = input(f"Enter path to Vanguard exe relative to prefix (e.g. {DEFAULT_REL_EXE}): ").strip()
+     
+        prefix = input(f"Enter Vanguard Proton prefix (ends with '/pfx'): ").strip()
+        exe_rel = input(f"Enter path to Vanguard exe relative to that prefix (e.g. {DEFAULT_REL_EXE}): ").strip()
 
+    if not validate_prefix_and_exe(prefix, exe_rel):
+        err("The resolved exe does not exist:\n  PREFIX =", prefix, "\n  EXE_REL =", exe_rel)
+        err("Tip: If your game is on an external library, pass --compatdata-id and ensure the prefix ends with '/pfx'.")
+        sys.exit(6)
+
+    tail = ""
     if not args.dry_run:
         tail = scan_vanguard_args(timeout=args.timeout)
 
@@ -385,9 +441,13 @@ def run_injection(args):
         time.sleep(1)
 
     exe_rel = exe_rel.replace("\\","/")
-    startdir = str((Path(prefix).expanduser() / Path(exe_rel).parent).resolve())
-    idx, entry = inject_shortcut(shortcuts_path, args.name, exe_rel, startdir, args.icon, "", args.dry_run)
+    exe_abs_path = (Path(prefix).expanduser() / exe_rel).resolve()
+    exe_abs = str(exe_abs_path)
+    startdir = str(exe_abs_path.parent)
+
+    idx, entry = inject_shortcut(shortcuts_path, args.name, exe_abs, startdir, args.icon, "", args.dry_run)
     info(f"Shortcut injected (index {idx}) at {shortcuts_path}")
+    info(f"Target (exe): {exe_abs}")
 
     if tail:
         obj = read_shortcuts(shortcuts_path)
@@ -415,12 +475,12 @@ def run_injection(args):
         "shortcut_name": args.name,
         "appid": appid,
         "proton_tool": args.proton,
-        "priority": args.priority
+        "priority": args.priority,
+        "compatdata_id": compat_id,
     }
     save_config(state)
     info(f"Saved config -> {CONF_PATH}")
-    info("Done. Steam should have the new shortcut and Proton mapping when you next start it.")
-    info(f"Log file: {LOG_PATH}")
+    info("Done. Start Steam and launch the new shortcut.")
 
 def run_status():
     saved = load_saved_config()
@@ -437,11 +497,12 @@ def main():
 
     ap = argparse.ArgumentParser(description=f"{APP_NAME}: inject Steam shortcut, auto-capture args, set Proton; writes logs + config.")
     ap.add_argument("--steam-root", help="Steam root (e.g. ~/.local/share/Steam)")
-    ap.add_argument("--prefix", help="Proton prefix root")
-    ap.add_argument("--exe", help="Path inside prefix to Vanguard exe")
+    ap.add_argument("--prefix", help="Proton prefix root (…/compatdata/<ID>/pfx)")
+    ap.add_argument("--exe", help="Path inside prefix to Vanguard exe (e.g. drive_c/…/EVEVanguardClient-Win64-Shipping.exe)")
+    ap.add_argument("--compatdata-id", help=f"Compatdata AppID to search (default {DEFAULT_COMPATDATA_ID})")
     ap.add_argument("--name", default=DEFAULT_SHORTCUT_NAME, help="Shortcut name")
     ap.add_argument("--icon", default="", help="Icon path")
-    ap.add_argument("--proton", default=DEFAULT_PROTON, help="Steam Play tool")
+    ap.add_argument("--proton", default=DEFAULT_PROTON, help="Steam Play tool to set")
     ap.add_argument("--priority", type=int, default=DEFAULT_PRIORITY, help="Compat tool priority")
     ap.add_argument("--timeout", type=int, default=120, help="Seconds to wait when capturing args")
     ap.add_argument("--dry-run", action="store_true", help="Preview only")
