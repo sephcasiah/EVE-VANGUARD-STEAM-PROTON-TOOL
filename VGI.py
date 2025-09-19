@@ -39,7 +39,7 @@ except Exception:
     sys.exit(1)
 
 DEBUG = False
-APP_NAME = "EVEVANGUARD_Shorcut_Inst"  # keep legacy name
+APP_NAME = "VGI"
 DEFAULT_SHORTCUT_NAME = "EVE Vanguard"
 DEFAULT_STEAM_ROOTS = [
     Path.home() / ".local" / "share" / "Steam",
@@ -53,7 +53,7 @@ DEFAULT_PRIORITY = 250
 EAC_EXE_NAME = "start_protected_game.exe"
 SHIPPING_EXE_NAME = "EVEVanguardClient-Win64-Shipping.exe"
 
-STATE_DIR = Path.home() / ".config" / "EVEVANGUARD_Shortcut_Inst"
+STATE_DIR = Path.home() / ".config" / "VGI"
 LOGS_DIR = STATE_DIR / "logs"
 CONF_PATH = STATE_DIR / "config.json"
 LOG_PATH = None
@@ -208,7 +208,7 @@ def make_shortcut(name, exe, startdir, icon="", launch_opts=""):
     return {
         "appid": random.randint(-2147483648, -1),
         "appname": name,
-        "exe": exe,  # ABSOLUTE path to EAC exe
+        "exe": exe,
         "StartDir": startdir,
         "icon": icon or "",
         "ShortcutPath": "",
@@ -310,7 +310,7 @@ def run_injection(args):
 
     saved = load_saved_config(); log("Loaded saved config:", json.dumps(saved, indent=2) if saved else "(none)")
 
-    # Resolve Steam root/profile/paths
+
     steam_root = Path(saved.get("steam_root")) if saved.get("steam_root") else None
     profile_id = saved.get("profile_id")
     shortcuts_path = Path(saved.get("shortcuts_vdf")) if saved.get("shortcuts_vdf") else None
@@ -334,7 +334,7 @@ def run_injection(args):
     compat_id = (args.compatdata_id or saved.get("compatdata_id") or DEFAULT_COMPATDATA_ID).strip()
 
     prefix = saved.get("prefix") or args.prefix
-    eac_rel = saved.get("exe_rel")  # previously saved path, if any
+    eac_rel = saved.get("exe_rel")
 
 
     if args.exe:
@@ -395,14 +395,14 @@ def run_injection(args):
     set_compat_tool(config_vdf, appid, args.proton, args.priority, args.dry_run)
     info(f"Set CompatToolMapping for AppID {appid} -> '{args.proton}'")
 
-    # Save state
+
     state = {
         "steam_root": str(steam_root),
         "profile_id": profile_id,
         "shortcuts_vdf": str(shortcuts_path),
         "config_vdf": str(config_vdf),
         "prefix": str(prefix),
-        "exe_rel": eac_rel,  # always EAC
+        "exe_rel": eac_rel,
         "shortcut_name": args.name,
         "appid": appid,
         "proton_tool": args.proton,
