@@ -174,12 +174,12 @@ def next_index(container: dict):
     nums = [int(k) for k in container.keys() if k.isdigit()]
     return str((max(nums)+1) if nums else 0)
 
-def make_shortcut(name, exe, startdir, icon="", launch_opts=""):
+def make_shortcut(name, exe: Path, icon="", launch_opts=""):
     return {
         "appid": random.randint(-2147483648, -1),
         "appname": name,
-        "exe": exe,
-        "StartDir": startdir,
+        "exe": str(exe),
+        "StartDir": str(exe.parent),
         "icon": icon or "",
         "ShortcutPath": "",
         "LaunchOptions": launch_opts,
@@ -189,14 +189,14 @@ def make_shortcut(name, exe, startdir, icon="", launch_opts=""):
         "tags": {"0": "Non-Steam"},
     }
 
-def inject_shortcut(shortcuts_path: Path, name, exe, startdir, icon="", launch_opts="", dry=False):
+def inject_shortcut(shortcuts_path: Path, name, exe: Path, icon="", launch_opts="", dry=False):
     obj = read_shortcuts(shortcuts_path)
     container = find_numeric_container(obj) or obj.get("shortcuts")
     if container is None:
         obj["shortcuts"] = {}
         container = obj["shortcuts"]
     idx = next_index(container)
-    entry = make_shortcut(name, exe, startdir, icon, launch_opts)
+    entry = make_shortcut(name, exe, icon, launch_opts)
     container[idx] = entry
     if dry:
         info("DRY RUN: would add shortcut at index", idx)
@@ -267,22 +267,17 @@ def get_compat_tool(config_vdf_path: Path, appid: int):
     except Exception:
         return None
 
-def auto_discover_prefix_and_exe(steam_root: Path):
+def auto_discover_exe(steam_root: Path):
     compat_root = steam_root / "steamapps" / "compatdata" / DEFAULT_COMPATDATA_ID / "pfx"
     exe_rel = DEFAULT_REL_EXE
     exe_abs = compat_root / exe_rel
     if exe_abs.exists():
-        return str(compat_root), exe_rel
-    candidate = None
+        return str(exe_abs)
+
     search_base = compat_root / "drive_c"
     if search_base.exists():
         for p in search_base.rglob("start_protected_game.exe"):
-            candidate = p
-            break
-    if candidate:
-        rel = candidate.relative_to(compat_root)
-        return str(compat_root), str(rel).replace("\\","/")
-    return None, None
+            return p
 
 def load_saved_config():
     if not CONF_PATH.exists():
@@ -361,21 +356,17 @@ def run_injection(args):
 
     info(f"Using Steam profile {profile_id}")
 
-    prefix = saved.get("prefix") or args.prefix
-    exe_rel = saved.get("exe_rel") or (args.exe.replace("\\","/") if args.exe else None)
+    exe = saved.get("exe") or (args.exe.replace("\\","/") if args.exe else None)
 
-    if not prefix or not exe_rel:
-        auto_prefix, auto_exe = auto_discover_prefix_and_exe(steam_root)
-        if not prefix: prefix = auto_prefix
-        if not exe_rel: exe_rel = auto_exe
+    if not exe:
+        exe = auto_discover_exe(steam_root)
 
-    if not prefix or not exe_rel:
+    if not exe:
         if args.no_prompt:
-            err("Could not auto-discover Vanguard path and prompting disabled.")
+            err("Could not auto-discover executable path and prompting disabled.")
             sys.exit(5)
-        info("Could not auto-discover Vanguard path.")
-        prefix = input("Enter Vanguard Proton prefix: ").strip()
-        exe_rel = input(f"Enter path to Vanguard exe relative to prefix (e.g. {DEFAULT_REL_EXE}): ").strip()
+        info("Could not auto-discover executable path.")
+        exe = input(f"Enter absolute path to {Path(DEFAULT_REL_EXE).name}: ").strip()
 
     if not args.dry_run:
         tail = scan_vanguard_args(timeout=args.timeout)
@@ -384,9 +375,12 @@ def run_injection(args):
     while is_steam_running(args.steam_root) and not args.dry_run and not args.force:
         time.sleep(1)
 
-    exe_rel = exe_rel.replace("\\","/")
-    startdir = str((Path(prefix).expanduser() / Path(exe_rel).parent).resolve())
-    idx, entry = inject_shortcut(shortcuts_path, args.name, exe_rel, startdir, args.icon, "", args.dry_run)
+    exe = Path(exe.replace("\\","/"))
+    if not exe.exists():
+        err(f"Could not find exeuctable {exe}")
+        sys.exit(5)
+
+    idx, entry = inject_shortcut(shortcuts_path, args.name, exe, args.icon, "", args.dry_run)
     info(f"Shortcut injected (index {idx}) at {shortcuts_path}")
 
     if tail:
@@ -410,8 +404,7 @@ def run_injection(args):
         "profile_id": profile_id,
         "shortcuts_vdf": str(shortcuts_path),
         "config_vdf": str(config_vdf),
-        "prefix": str(prefix),
-        "exe_rel": str(exe_rel),
+        "exe": str(exe),
         "shortcut_name": args.name,
         "appid": appid,
         "proton_tool": args.proton,
@@ -437,8 +430,7 @@ def main():
 
     ap = argparse.ArgumentParser(description=f"{APP_NAME}: inject Steam shortcut, auto-capture args, set Proton; writes logs + config.")
     ap.add_argument("--steam-root", help="Steam root (e.g. ~/.local/share/Steam)")
-    ap.add_argument("--prefix", help="Proton prefix root")
-    ap.add_argument("--exe", help="Path inside prefix to Vanguard exe")
+    ap.add_argument("--exe", help=f"Path to {Path(DEFAULT_REL_EXE).name}")
     ap.add_argument("--name", default=DEFAULT_SHORTCUT_NAME, help="Shortcut name")
     ap.add_argument("--icon", default="", help="Icon path")
     ap.add_argument("--proton", default=DEFAULT_PROTON, help="Steam Play tool")
