@@ -380,7 +380,7 @@ def run_injection(args):
     if not args.dry_run:
         tail = scan_vanguard_args(timeout=args.timeout)
 
-    info("Waiting for Steam to exit before continuing")
+    info("Please exit Steam to continue")
     while is_steam_running(args.steam_root) and not args.dry_run and not args.force:
         time.sleep(1)
 
